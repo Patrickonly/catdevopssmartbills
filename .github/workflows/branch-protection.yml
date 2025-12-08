@@ -1,0 +1,19 @@
+name: Branch Protection
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  protect-main:
+    name: Protect Main Branch
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Block direct pushes to main
+        run: |
+          echo "❌ Direct pushes to main branch are not allowed!"
+          echo "Please create a pull request from develop branch."
+          exit 1

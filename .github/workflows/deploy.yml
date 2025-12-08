@@ -1,0 +1,64 @@
+name: Deploy Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/ingress.yaml
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/smartbill-wasc -n smartbill-wasc --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n smartbill-wasc
+          kubectl get svc -n smartbill-wasc
+          kubectl get hpa -n smartbill-wasc
+
+      - name: Run smoke tests
+        run: |
+          EXTERNAL_IP=$(kubectl get svc smartbill-wasc -n smartbill-wasc -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          curl -f http://$EXTERNAL_IP/health || exit 1
+
+      - name: Notify deployment success
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: |
+            ✅ Deployment successful!
+            Environment: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+            Version: ${{ github.sha }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}

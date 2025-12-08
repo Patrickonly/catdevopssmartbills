@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: smartbill-wasc
+  namespace: smartbill-wasc
+  labels:
+    app: smartbill-wasc
+spec:
+  type: ClusterIP
+  selector:
+    app: smartbill-wasc
+  ports:
+  - name: http
+    port: 80
+    targetPort: 5000
+    protocol: TCP
+  sessionAffinity: ClientIP

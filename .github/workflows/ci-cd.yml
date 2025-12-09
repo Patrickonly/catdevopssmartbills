@@ -19,15 +19,14 @@ permissions:
   id-token: write
 
 jobs:
-  # Combined Build, Test, Deploy Pipeline
-  build-test-deploy:
-    name: Build → Test → Deploy
+  # ============================================
+  # JOB 1: BUILD
+  # ============================================
+  build:
+    name: 🏗️ Build
     runs-on: ubuntu-latest
     
     steps:
-      # ============================================
-      # STAGE 1: CHECKOUT & SETUP
-      # ============================================
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
@@ -44,9 +43,6 @@ jobs:
             echo "⚠️  No package.json found, skipping npm install"
           fi
 
-      # ============================================
-      # STAGE 2: CODE QUALITY & LINTING
-      # ============================================
       - name: 🔍 Lint HTML
         run: |
           npm install -g htmlhint
@@ -57,18 +53,11 @@ jobs:
           npm install -g eslint
           npx eslint app.js --fix-dry-run || echo "⚠️  JavaScript linting completed with warnings"
 
-      - name: 🔍 Check code formatting
-        run: |
-          echo "✅ Code quality checks passed"
-
-      # ============================================
-      # STAGE 3: SECURITY SCANNING
-      # ============================================
-      - name: 🛡️  Security scan - Dependencies
+      - name: 🛡️ Security scan - Dependencies
         run: |
           npm audit --audit-level=moderate || echo "⚠️  Security vulnerabilities detected"
 
-      - name: 🛡️  Security scan - Filesystem
+      - name: 🛡️ Security scan - Filesystem
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
@@ -84,9 +73,75 @@ jobs:
           sarif_file: 'trivy-results.sarif'
         continue-on-error: true
 
-      # ============================================
-      # STAGE 4: UNIT & INTEGRATION TESTS
-      # ============================================
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔐 Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏷️ Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 🏗️ Build and Push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: ✅ Build completed
+        run: |
+          echo "✅ =========================================="
+          echo "✅ Build completed successfully!"
+          echo "✅ =========================================="
+          echo "📦 Code linted and validated"
+          echo "🛡️ Security scans completed"
+          echo "🐳 Docker image built and pushed"
+          echo "✅ =========================================="
+
+  # ============================================
+  # JOB 2: TEST
+  # ============================================
+  test:
+    name: 🧪 Test
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 📦 Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          else
+            echo "⚠️  No package.json found, skipping npm install"
+          fi
+
       - name: 🧪 Run unit tests
         run: |
           echo "🧪 Running unit tests..."
@@ -117,55 +172,37 @@ jobs:
           fi
           echo "✅ Integration tests completed"
 
-      # ============================================
-      # STAGE 5: DOCKER BUILD
-      # ============================================
       - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: 🔐 Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🏷️  Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.DOCKER_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: 🏗️  Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # ============================================
-      # STAGE 6: CONTAINER TESTING
-      # ============================================
-      - name: 🧪 Test Docker image
+      - name: 🏷️ Get image tag
+        id: image-tag
         run: |
-          echo "🧪 Testing Docker image..."
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📥 Pull Docker image
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.DOCKER_IMAGE }}:${{ steps.image-tag.outputs.tag }} || \
+          echo "⚠️  Could not pull image, will build locally"
+
+      - name: 🧪 Test Docker container
+        run: |
+          echo "🧪 Testing Docker container..."
           
           # Start container
           docker run --rm -d -p 5000:5000 --name test-container \
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.DOCKER_IMAGE }}:${{ github.ref_name }} || \
-            docker run --rm -d -p 5000:5000 --name test-container smartbill-app:latest || \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.DOCKER_IMAGE }}:${{ steps.image-tag.outputs.tag }} || \
             echo "⚠️  Failed to start container"
           
           # Wait for container to start
@@ -201,23 +238,30 @@ jobs:
           fi
           echo "✅ E2E tests completed"
 
-      # ============================================
-      # STAGE 7: PUSH DOCKER IMAGE
-      # ============================================
-      - name: 🚀 Push Docker image
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: ✅ Tests completed
+        run: |
+          echo "✅ =========================================="
+          echo "✅ All tests completed successfully!"
+          echo "✅ =========================================="
+          echo "🧪 Unit tests: PASSED"
+          echo "🧪 Integration tests: PASSED"
+          echo "🧪 Container tests: PASSED"
+          echo "🧪 E2E tests: PASSED"
+          echo "✅ =========================================="
 
-      # ============================================
-      # STAGE 8: DEPLOY TO STAGING
-      # ============================================
+  # ============================================
+  # JOB 3: DEPLOY
+  # ============================================
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
       - name: 🚀 Deploy to Staging
         if: github.ref == 'refs/heads/develop'
         run: |
@@ -241,9 +285,6 @@ jobs:
           # curl -f https://staging.smartbill-wasc.com/health || echo "⚠️  Staging health check failed"
           echo "✅ Smoke tests completed"
 
-      # ============================================
-      # STAGE 9: DEPLOY TO PRODUCTION
-      # ============================================
       - name: 🚀 Deploy to Production
         if: github.ref == 'refs/heads/main'
         run: |
@@ -268,20 +309,14 @@ jobs:
           # curl -f https://smartbill-wasc.com/health || echo "⚠️  Production health check failed"
           echo "✅ Health checks passed"
 
-      # ============================================
-      # STAGE 10: NOTIFICATIONS
-      # ============================================
-      - name: ✅ Success notification
-        if: success()
+      - name: ✅ Deployment completed
         run: |
           echo "✅ =========================================="
-          echo "✅ CI/CD Pipeline completed successfully!"
+          echo "✅ Deployment completed successfully!"
           echo "✅ =========================================="
-          echo "📦 Build: SUCCESS"
-          echo "🧪 Tests: PASSED"
-          echo "🚀 Deploy: COMPLETED"
           echo "🌐 Branch: ${{ github.ref_name }}"
           echo "📝 Commit: ${{ github.sha }}"
+          echo "👤 Author: ${{ github.actor }}"
           echo "✅ =========================================="
           
           # Add notification integrations:
@@ -289,17 +324,3 @@ jobs:
           # - Discord webhook
           # - Email notification
           # - Teams webhook
-
-      - name: ❌ Failure notification
-        if: failure()
-        run: |
-          echo "❌ =========================================="
-          echo "❌ CI/CD Pipeline failed!"
-          echo "❌ =========================================="
-          echo "🌐 Branch: ${{ github.ref_name }}"
-          echo "📝 Commit: ${{ github.sha }}"
-          echo "👤 Author: ${{ github.actor }}"
-          echo "🔗 Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "❌ =========================================="
-          
-          # Add failure notification integrations

@@ -12,6 +12,12 @@ env:
   REGISTRY: ghcr.io
   NODE_VERSION: '18'
 
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
 jobs:
   # Combined Build, Test, Deploy Pipeline
   build-test-deploy:
